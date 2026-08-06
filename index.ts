@@ -517,7 +517,7 @@ export default function (pi: ExtensionAPI) {
 
 	// ----- Streaming preview ------------------------------------------------
 
-	async function clearPreview(chatId: number): Promise<void> {
+	async function clearPreview(_chatId?: number): Promise<void> {
 		const state = previewState;
 		if (!state) return;
 		if (state.flushTimer) {
@@ -525,13 +525,10 @@ export default function (pi: ExtensionAPI) {
 			state.flushTimer = undefined;
 		}
 		previewState = undefined;
-		if (state.mode === "draft" && state.draftId !== undefined) {
-			try {
-				await callTelegram("sendMessageDraft", { chat_id: chatId, draft_id: state.draftId, text: "" });
-			} catch {
-				// ignore
-			}
-		}
+		// IMPORTANT: do NOT call sendMessageDraft with empty text.
+		// Per Bot API docs, empty text shows a "Thinking…" placeholder (the ··· bubble),
+		// it does NOT dismiss the draft. Drafts are ephemeral (~30s) and disappear once
+		// the final sendMessage lands (or when they expire).
 	}
 
 	async function flushPreview(chatId: number): Promise<void> {
@@ -591,9 +588,10 @@ export default function (pi: ExtensionAPI) {
 			}
 			// Skip the redundant draft flush: the real message replaces the draft,
 			// so pushing the final text to the draft first only adds latency.
+			// After sendMessage, just drop local state — do not "clear" the draft via
+			// empty text (that creates the lingering Thinking… ··· tail).
 			await callTelegram<TelegramSentMessage>("sendMessage", { chat_id: chatId, text: finalText });
-			// Draft clearing is cosmetic cleanup; keep it off the critical path.
-			void clearPreview(chatId);
+			void clearPreview();
 			return true;
 		}
 		await flushPreview(chatId);

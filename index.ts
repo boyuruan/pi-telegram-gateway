@@ -151,6 +151,7 @@ interface TelegramPreviewState {
 	pendingText: string;
 	lastSentText: string;
 	flushTimer?: ReturnType<typeof setTimeout>;
+	flushing?: Promise<void>;
 }
 
 interface TelegramMediaGroupState {
@@ -341,7 +342,7 @@ export default function (pi: ExtensionAPI) {
 	function startConfigFlushTimer(): void {
 		if (configFlushTimer) return;
 		configFlushTimer = setInterval(() => {
-			if (configDirty) void flushConfig();
+			if (configDirty) void flushConfig().catch(() => undefined);
 		}, CONFIG_FLUSH_INTERVAL_MS);
 	}
 
@@ -534,14 +535,39 @@ export default function (pi: ExtensionAPI) {
 		// there is no Bot API method to dismiss a draft, so we simply drop local state.
 	}
 
+	function isMessageNotModified(error: unknown): boolean {
+		return (
+			error instanceof TelegramApiError &&
+			error.errorCode === 400 &&
+			/message is not modified/i.test(error.message)
+		);
+	}
+
 	async function flushPreview(chatId: number): Promise<void> {
 		const state = previewState;
 		if (!state) return;
 		state.flushTimer = undefined;
+		// Serialize concurrent flushes: a timer flush and a finalize flush may
+		// overlap; without this, both would send the same editMessageText and
+		// Telegram rejects the second with 400 "message is not modified".
+		if (state.flushing) {
+			await state.flushing.catch(() => undefined);
+			if (previewState !== state) return;
+		}
 		const text = state.pendingText.trim();
 		if (!text || text === state.lastSentText) return;
 		const truncated = text.length > MAX_MESSAGE_LENGTH ? text.slice(0, MAX_MESSAGE_LENGTH) : text;
 
+		const p = doFlush(state, chatId, truncated);
+		state.flushing = p;
+		try {
+			await p;
+		} finally {
+			if (state.flushing === p) state.flushing = undefined;
+		}
+	}
+
+	async function doFlush(state: TelegramPreviewState, chatId: number, truncated: string): Promise<void> {
 		if (draftSupport !== "unsupported") {
 			const draftId = state.draftId ?? allocateDraftId();
 			state.draftId = draftId;
@@ -567,7 +593,12 @@ export default function (pi: ExtensionAPI) {
 			stopTypingLoop();
 			return;
 		}
-		await callTelegram("editMessageText", { chat_id: chatId, message_id: state.messageId, text: truncated });
+		try {
+			await callTelegram("editMessageText", { chat_id: chatId, message_id: state.messageId, text: truncated });
+		} catch (error) {
+			// A no-op edit is harmless — treat it as success and move on.
+			if (!isMessageNotModified(error)) throw error;
+		}
 		state.mode = "message";
 		state.lastSentText = truncated;
 		stopTypingLoop();
@@ -576,35 +607,41 @@ export default function (pi: ExtensionAPI) {
 	function schedulePreviewFlush(chatId: number): void {
 		if (!previewState || previewState.flushTimer) return;
 		previewState.flushTimer = setTimeout(() => {
-			void flushPreview(chatId);
+			// Never let a background flush crash the process.
+			void flushPreview(chatId).catch(() => undefined);
 		}, PREVIEW_THROTTLE_MS);
 	}
 
 	async function finalizePreview(chatId: number): Promise<boolean> {
-		const state = previewState;
-		if (!state) return false;
-		if (state.mode === "draft") {
+		// Never throw: callers fall back to sendTextReply when this returns false.
+		try {
+			const state = previewState;
+			if (!state) return false;
+			if (state.mode === "draft") {
+				const finalText = (state.pendingText.trim() || state.lastSentText).trim();
+				if (!finalText) {
+					await clearPreview(chatId);
+					return false;
+				}
+				// Skip the redundant draft flush: the real message replaces the draft,
+				// so pushing the final text to the draft first only adds latency.
+				// After sendMessage, just drop local state — do not "clear" the draft via
+				// empty text (that creates the lingering Thinking… ··· tail).
+				await callTelegram<TelegramSentMessage>("sendMessage", { chat_id: chatId, text: finalText });
+				void clearPreview();
+				return true;
+			}
+			await flushPreview(chatId);
 			const finalText = (state.pendingText.trim() || state.lastSentText).trim();
 			if (!finalText) {
 				await clearPreview(chatId);
 				return false;
 			}
-			// Skip the redundant draft flush: the real message replaces the draft,
-			// so pushing the final text to the draft first only adds latency.
-			// After sendMessage, just drop local state — do not "clear" the draft via
-			// empty text (that creates the lingering Thinking… ··· tail).
-			await callTelegram<TelegramSentMessage>("sendMessage", { chat_id: chatId, text: finalText });
-			void clearPreview();
-			return true;
-		}
-		await flushPreview(chatId);
-		const finalText = (state.pendingText.trim() || state.lastSentText).trim();
-		if (!finalText) {
-			await clearPreview(chatId);
+			previewState = undefined;
+			return state.messageId !== undefined;
+		} catch {
 			return false;
 		}
-		previewState = undefined;
-		return state.messageId !== undefined;
 	}
 
 	// ----- Sending replies --------------------------------------------------
@@ -863,11 +900,11 @@ export default function (pi: ExtensionAPI) {
 			}
 			ctx.compact({
 				onComplete: () => {
-					void sendTextReply(firstMessage.chat.id, firstMessage.message_id, "Compaction completed.");
+					void sendTextReply(firstMessage.chat.id, firstMessage.message_id, "Compaction completed.").catch(() => undefined);
 				},
 				onError: (error) => {
 					const message = error instanceof Error ? error.message : String(error);
-					void sendTextReply(firstMessage.chat.id, firstMessage.message_id, `Compaction failed: ${message}`);
+					void sendTextReply(firstMessage.chat.id, firstMessage.message_id, `Compaction failed: ${message}`).catch(() => undefined);
 				},
 			});
 			await sendTextReply(firstMessage.chat.id, firstMessage.message_id, "Compaction started.");
@@ -951,7 +988,7 @@ export default function (pi: ExtensionAPI) {
 				const state = mediaGroups.get(key);
 				mediaGroups.delete(key);
 				if (!state) return;
-				void dispatchAuthorizedTelegramMessages(state.messages, ctx);
+				void dispatchAuthorizedTelegramMessages(state.messages, ctx).catch(() => undefined);
 			}, TELEGRAM_MEDIA_GROUP_DEBOUNCE_MS);
 			mediaGroups.set(key, existing);
 			return;
@@ -1243,6 +1280,16 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("agent_settled", async (_event, ctx) => {
+		// Last line of defense: a Telegram hiccup must never crash pi.
+		try {
+			await handleAgentSettled(ctx);
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			updateStatus(ctx, `settled failed: ${message}`);
+		}
+	});
+
+	async function handleAgentSettled(ctx: ExtensionContext): Promise<void> {
 		const turn = activeTelegramTurn;
 		currentAbort = undefined;
 		stopTypingLoop();
@@ -1295,7 +1342,7 @@ export default function (pi: ExtensionAPI) {
 			updateStatus(ctx);
 			pi.sendUserMessage(nextTurn.content, { deliverAs: "followUp" });
 		}
-	});
+	}
 }
 
 // ---------------------------------------------------------------------------

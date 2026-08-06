@@ -550,6 +550,9 @@ export default function (pi: ExtensionAPI) {
 				draftSupport = "supported";
 				state.mode = "draft";
 				state.lastSentText = truncated;
+				// The streaming preview itself is now the progress signal; the typing
+				// indicator would only linger as a "tail" after the reply is done.
+				stopTypingLoop();
 				return;
 			} catch {
 				draftSupport = "unsupported";
@@ -561,11 +564,13 @@ export default function (pi: ExtensionAPI) {
 			state.messageId = sent.message_id;
 			state.mode = "message";
 			state.lastSentText = truncated;
+			stopTypingLoop();
 			return;
 		}
 		await callTelegram("editMessageText", { chat_id: chatId, message_id: state.messageId, text: truncated });
 		state.mode = "message";
 		state.lastSentText = truncated;
+		stopTypingLoop();
 	}
 
 	function schedulePreviewFlush(chatId: number): void {
@@ -578,16 +583,24 @@ export default function (pi: ExtensionAPI) {
 	async function finalizePreview(chatId: number): Promise<boolean> {
 		const state = previewState;
 		if (!state) return false;
+		if (state.mode === "draft") {
+			const finalText = (state.pendingText.trim() || state.lastSentText).trim();
+			if (!finalText) {
+				await clearPreview(chatId);
+				return false;
+			}
+			// Skip the redundant draft flush: the real message replaces the draft,
+			// so pushing the final text to the draft first only adds latency.
+			await callTelegram<TelegramSentMessage>("sendMessage", { chat_id: chatId, text: finalText });
+			// Draft clearing is cosmetic cleanup; keep it off the critical path.
+			void clearPreview(chatId);
+			return true;
+		}
 		await flushPreview(chatId);
 		const finalText = (state.pendingText.trim() || state.lastSentText).trim();
 		if (!finalText) {
 			await clearPreview(chatId);
 			return false;
-		}
-		if (state.mode === "draft") {
-			await callTelegram<TelegramSentMessage>("sendMessage", { chat_id: chatId, text: finalText });
-			await clearPreview(chatId);
-			return true;
 		}
 		previewState = undefined;
 		return state.messageId !== undefined;
@@ -1205,6 +1218,11 @@ export default function (pi: ExtensionAPI) {
 		}
 		previewState.pendingText = getMessageText(event.message);
 		schedulePreviewFlush(activeTelegramTurn.chatId);
+	});
+
+	// During long tool executions there is no streaming preview; show typing again.
+	pi.on("tool_execution_start", async (_event, ctx) => {
+		if (activeTelegramTurn) startTypingLoop(ctx);
 	});
 
 	// Store the result from each low-level agent run but do NOT act on it yet.

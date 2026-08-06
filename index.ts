@@ -323,7 +323,11 @@ export default function (pi: ExtensionAPI) {
 	let preserveQueuedTurnsAsHistory = false;
 	let setupInProgress = false;
 	let previewState: TelegramPreviewState | undefined;
-	let draftSupport: "unknown" | "supported" | "unsupported" = "unknown";
+	// sendMessageDraft leaves a duplicate ephemeral bubble next to the real
+	// sendMessage (and empty text shows Thinking… ···). Prefer editMessageText
+	// streaming — one message, no ghost tail. Keep the draft code path for a
+	// possible future revisit, but never auto-enable it.
+	let draftSupport: "unknown" | "supported" | "unsupported" = "unsupported";
 	let nextDraftId = 0;
 	let pendingAgentResult: PendingAgentResult | undefined;
 	const mediaGroups = new Map<string, TelegramMediaGroupState>();
@@ -525,10 +529,9 @@ export default function (pi: ExtensionAPI) {
 			state.flushTimer = undefined;
 		}
 		previewState = undefined;
-		// IMPORTANT: do NOT call sendMessageDraft with empty text.
-		// Per Bot API docs, empty text shows a "Thinking…" placeholder (the ··· bubble),
-		// it does NOT dismiss the draft. Drafts are ephemeral (~30s) and disappear once
-		// the final sendMessage lands (or when they expire).
+		// Message-mode previews are real messages (edited in place) — nothing to dismiss.
+		// Draft-mode: do NOT call sendMessageDraft with empty text (that shows Thinking…);
+		// there is no Bot API method to dismiss a draft, so we simply drop local state.
 	}
 
 	async function flushPreview(chatId: number): Promise<void> {

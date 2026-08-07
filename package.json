@@ -14,11 +14,11 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/boyuruan/pi-telegram.git"
+    "url": "https://github.com/boyuruan/pi-telegram-gateway.git"
   },
-  "homepage": "https://github.com/boyuruan/pi-telegram",
+  "homepage": "https://github.com/boyuruan/pi-telegram-gateway",
   "bugs": {
-    "url": "https://github.com/boyuruan/pi-telegram/issues"
+    "url": "https://github.com/boyuruan/pi-telegram-gateway/issues"
   },
   "pi": {
     "extensions": [

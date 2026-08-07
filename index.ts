@@ -17,6 +17,8 @@ interface TelegramConfig {
 	botUsername?: string;
 	botId?: number;
 	allowedUserId?: number;
+	/** User ids allowed to use the bot in group chats without mentioning it. */
+	allowedUserIds?: number[];
 	pairingCode?: string;
 	lastUpdateId?: number;
 }
@@ -148,6 +150,7 @@ interface TelegramPreviewState {
 	mode: "draft" | "message";
 	draftId?: number;
 	messageId?: number;
+	replyToMessageId?: number;
 	pendingText: string;
 	lastSentText: string;
 	flushTimer?: ReturnType<typeof setTimeout>;
@@ -241,6 +244,41 @@ function generatePairingCode(): string {
 	return String(randomInt(100000, 1000000));
 }
 
+function escapeRegExp(text: string): string {
+	return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * Extract a normalized command name from a message, or undefined for plain text.
+ * Accepts both "stop" and "/stop", and strips @bot suffixes (e.g. "/status@MyBot").
+ */
+function normalizeCommand(lowerText: string): string | undefined {
+	const trimmed = lowerText.trim();
+	if (trimmed === "stop") return "stop";
+	if (!trimmed.startsWith("/")) return undefined;
+	const token = trimmed.split(/\s+/)[0];
+	let name = token.slice(1);
+	const atIndex = name.indexOf("@");
+	if (atIndex !== -1) name = name.slice(0, atIndex);
+	return name || undefined;
+}
+
+/** True when the message text/caption mentions the bot (@username). */
+function isBotMentioned(message: TelegramMessage, botUsername: string | undefined): boolean {
+	if (!botUsername) return false;
+	const needle = `@${botUsername.toLowerCase()}`;
+	const text = (message.text || message.caption || "").toLowerCase();
+	return text.includes(needle);
+}
+
+/** Remove all @username mentions of the bot from the message text/caption. */
+function stripBotMention(message: TelegramMessage, botUsername: string | undefined): void {
+	if (!botUsername) return;
+	const pattern = new RegExp(`@${escapeRegExp(botUsername)}`, "gi");
+	if (message.text) message.text = message.text.replace(pattern, "").replace(/\s+/g, " ").trim();
+	if (message.caption) message.caption = message.caption.replace(pattern, "").replace(/\s+/g, " ").trim();
+}
+
 function chunkParagraphs(text: string): string[] {
 	if (text.length <= MAX_MESSAGE_LENGTH) return [text];
 
@@ -332,6 +370,8 @@ export default function (pi: ExtensionAPI) {
 	let nextDraftId = 0;
 	let pendingAgentResult: PendingAgentResult | undefined;
 	const mediaGroups = new Map<string, TelegramMediaGroupState>();
+	// Media-group keys already admitted in a group chat (via @mention on one message of the album).
+	const acceptedMediaGroupKeys = new Set<string>();
 
 	// ----- Config persistence (batched) ------------------------------------
 
@@ -586,7 +626,9 @@ export default function (pi: ExtensionAPI) {
 		}
 
 		if (state.messageId === undefined) {
-			const sent = await callTelegram<TelegramSentMessage>("sendMessage", { chat_id: chatId, text: truncated });
+			const params: Record<string, unknown> = { chat_id: chatId, text: truncated };
+			if (state.replyToMessageId) params.reply_to_message_id = state.replyToMessageId;
+			const sent = await callTelegram<TelegramSentMessage>("sendMessage", params);
 			state.messageId = sent.message_id;
 			state.mode = "message";
 			state.lastSentText = truncated;
@@ -627,7 +669,9 @@ export default function (pi: ExtensionAPI) {
 				// so pushing the final text to the draft first only adds latency.
 				// After sendMessage, just drop local state — do not "clear" the draft via
 				// empty text (that creates the lingering Thinking… ··· tail).
-				await callTelegram<TelegramSentMessage>("sendMessage", { chat_id: chatId, text: finalText });
+				const params: Record<string, unknown> = { chat_id: chatId, text: finalText };
+				if (state.replyToMessageId) params.reply_to_message_id = state.replyToMessageId;
+				await callTelegram<TelegramSentMessage>("sendMessage", params);
 				void clearPreview();
 				return true;
 			}
@@ -646,14 +690,13 @@ export default function (pi: ExtensionAPI) {
 
 	// ----- Sending replies --------------------------------------------------
 
-	async function sendTextReply(chatId: number, _replyToMessageId: number, text: string): Promise<number | undefined> {
+	async function sendTextReply(chatId: number, replyToMessageId: number, text: string): Promise<number | undefined> {
 		const chunks = chunkParagraphs(text);
 		let lastMessageId: number | undefined;
 		for (const chunk of chunks) {
-			const sent = await callTelegram<TelegramSentMessage>("sendMessage", {
-				chat_id: chatId,
-				text: chunk,
-			});
+			const params: Record<string, unknown> = { chat_id: chatId, text: chunk };
+			if (replyToMessageId) params.reply_to_message_id = replyToMessageId;
+			const sent = await callTelegram<TelegramSentMessage>("sendMessage", params);
 			lastMessageId = sent.message_id;
 		}
 		return lastMessageId;
@@ -830,6 +873,9 @@ export default function (pi: ExtensionAPI) {
 		const files = await buildTelegramFiles(messages);
 		const content: Array<TextContent | ImageContent> = [];
 		let prompt = `${TELEGRAM_PREFIX}`;
+		if (firstMessage.chat.type !== "private") {
+			prompt += " (from a Telegram group chat)";
+		}
 
 		if (historyTurns.length > 0) {
 			prompt += `\n\nEarlier Telegram messages arrived after an aborted turn. Treat them as prior user messages, in order:`;
@@ -873,13 +919,13 @@ export default function (pi: ExtensionAPI) {
 
 	// ----- Command handling -------------------------------------------------
 
-	async function dispatchAuthorizedTelegramMessages(messages: TelegramMessage[], ctx: ExtensionContext): Promise<void> {
+	async function dispatchAuthorizedTelegramMessages(messages: TelegramMessage[], ctx: ExtensionContext, fromId: number): Promise<void> {
 		const firstMessage = messages[0];
 		if (!firstMessage) return;
 		const rawText = messages.map((message) => (message.text || message.caption || "").trim()).find((text) => text.length > 0) || "";
-		const lower = rawText.toLowerCase();
+		const command = normalizeCommand(rawText.toLowerCase());
 
-		if (lower === "stop" || lower === "/stop") {
+		if (command === "stop") {
 			if (currentAbort) {
 				if (queuedTelegramTurns.length > 0) {
 					preserveQueuedTurnsAsHistory = true;
@@ -893,7 +939,11 @@ export default function (pi: ExtensionAPI) {
 			return;
 		}
 
-		if (lower === "/compact") {
+		if (command === "compact") {
+			if (fromId !== config.allowedUserId) {
+				await sendTextReply(firstMessage.chat.id, firstMessage.message_id, "Only the owner can run /compact.");
+				return;
+			}
 			if (!ctx.isIdle()) {
 				await sendTextReply(firstMessage.chat.id, firstMessage.message_id, 'Cannot compact while pi is busy. Send "stop" first.');
 				return;
@@ -911,7 +961,7 @@ export default function (pi: ExtensionAPI) {
 			return;
 		}
 
-		if (lower === "/status") {
+		if (command === "status") {
 			let totalInput = 0;
 			let totalOutput = 0;
 			let totalCacheRead = 0;
@@ -958,12 +1008,17 @@ export default function (pi: ExtensionAPI) {
 			return;
 		}
 
-		if (lower === "/help") {
+		if (command === "help") {
 			await sendTextReply(
 				firstMessage.chat.id,
 				firstMessage.message_id,
-				`Send me a message and I will forward it to pi. Commands: /status, /compact, stop.`,
+				`Send me a message and I will forward it to pi. Commands: /status, /compact, /whitelist, stop.`,
 			);
+			return;
+		}
+
+		if (command === "whitelist") {
+			await handleWhitelistCommand(rawText, fromId, firstMessage);
 			return;
 		}
 
@@ -978,6 +1033,65 @@ export default function (pi: ExtensionAPI) {
 		}
 	}
 
+	// ----- Group whitelist ------------------------------------------------
+
+	async function handleWhitelistCommand(rawText: string, fromId: number, firstMessage: TelegramMessage): Promise<void> {
+		const parts = rawText.trim().split(/\s+/);
+		const sub = parts[1]?.toLowerCase();
+		const current = config.allowedUserIds ?? [];
+
+		if (sub === undefined || sub === "list") {
+			const lines = ["Group whitelist (免 @ 使用):"];
+			if (current.length === 0) lines.push("(empty)");
+			for (const id of current) lines.push(`- ${id}`);
+			lines.push(`Owner (${config.allowedUserId}) is always allowed.`);
+			await sendTextReply(firstMessage.chat.id, firstMessage.message_id, lines.join("\n"));
+			return;
+		}
+
+		if (sub === "add" || sub === "remove") {
+			if (fromId !== config.allowedUserId) {
+				await sendTextReply(firstMessage.chat.id, firstMessage.message_id, "Only the owner can manage the whitelist.");
+				return;
+			}
+			const target = Number(parts[2]);
+			if (!Number.isInteger(target) || target <= 0) {
+				await sendTextReply(
+					firstMessage.chat.id,
+					firstMessage.message_id,
+					`Usage: /whitelist ${sub} <user id>\n\nFind your user id by sending /id to the bot in the group.`,
+				);
+				return;
+			}
+			const list = [...current];
+			if (sub === "add") {
+				if (list.includes(target)) {
+					await sendTextReply(firstMessage.chat.id, firstMessage.message_id, `${target} is already in the whitelist.`);
+					return;
+				}
+				list.push(target);
+				await sendTextReply(firstMessage.chat.id, firstMessage.message_id, `Added ${target} to the whitelist.`);
+			} else {
+				if (!list.includes(target)) {
+					await sendTextReply(firstMessage.chat.id, firstMessage.message_id, `${target} is not in the whitelist.`);
+					return;
+				}
+				list.splice(list.indexOf(target), 1);
+				await sendTextReply(firstMessage.chat.id, firstMessage.message_id, `Removed ${target} from the whitelist.`);
+			}
+			config.allowedUserIds = list;
+			markConfigDirty();
+			await flushConfig();
+			return;
+		}
+
+		await sendTextReply(
+			firstMessage.chat.id,
+			firstMessage.message_id,
+			`Usage:\n/whitelist list\n/whitelist add <user id>\n/whitelist remove <user id>`,
+		);
+	}
+
 	async function handleAuthorizedTelegramMessage(message: TelegramMessage, ctx: ExtensionContext): Promise<void> {
 		if (message.media_group_id) {
 			const key = `${message.chat.id}:${message.media_group_id}`;
@@ -988,21 +1102,25 @@ export default function (pi: ExtensionAPI) {
 				const state = mediaGroups.get(key);
 				mediaGroups.delete(key);
 				if (!state) return;
-				void dispatchAuthorizedTelegramMessages(state.messages, ctx).catch(() => undefined);
+				const firstFromId = state.messages[0]?.from?.id ?? 0;
+				void dispatchAuthorizedTelegramMessages(state.messages, ctx, firstFromId).catch(() => undefined);
 			}, TELEGRAM_MEDIA_GROUP_DEBOUNCE_MS);
 			mediaGroups.set(key, existing);
 			return;
 		}
 
-		await dispatchAuthorizedTelegramMessages([message], ctx);
+		await dispatchAuthorizedTelegramMessages([message], ctx, message.from?.id ?? 0);
 	}
 
 	async function handleUpdate(update: TelegramUpdate, ctx: ExtensionContext): Promise<void> {
 		const message = update.message || update.edited_message;
-		if (!message || message.chat.type !== "private" || !message.from || message.from.is_bot) return;
+		if (!message || !message.from || message.from.is_bot) return;
+		const chatType = message.chat.type;
+		if (chatType !== "private" && chatType !== "group" && chatType !== "supergroup") return;
 
-		// --- Pairing flow ---
+		// --- Pairing flow (private chat only) ---
 		if (config.allowedUserId === undefined) {
+			if (chatType !== "private") return;
 			const text = (message.text || "").trim();
 			const lower = text.toLowerCase();
 			if (lower === "/start" || lower.startsWith("/start ")) {
@@ -1033,11 +1151,45 @@ export default function (pi: ExtensionAPI) {
 			return;
 		}
 
-		if (message.from.id !== config.allowedUserId) {
-			await sendTextReply(message.chat.id, message.message_id, "This bot is not authorized for your account.");
+		const fromId = message.from.id;
+		const isOwner = fromId === config.allowedUserId;
+		const isWhitelisted = isOwner || (config.allowedUserIds?.includes(fromId) ?? false);
+
+		if (chatType === "private") {
+			if (!isOwner) {
+				await sendTextReply(message.chat.id, message.message_id, "This bot is not authorized for your account.");
+				return;
+			}
+			await handleAuthorizedTelegramMessage(message, ctx);
 			return;
 		}
 
+		// Group / supergroup: trigger on @mention, or without mention for whitelisted users.
+		if (isWhitelisted) {
+			stripBotMention(message, config.botUsername);
+			await handleAuthorizedTelegramMessage(message, ctx);
+			return;
+		}
+		if (!isBotMentioned(message, config.botUsername)) {
+			// Once one message of an album was admitted, admit the rest of the album.
+			if (message.media_group_id && acceptedMediaGroupKeys.has(`${message.chat.id}:${message.media_group_id}`)) {
+				await handleAuthorizedTelegramMessage(message, ctx);
+			}
+			return;
+		}
+		stripBotMention(message, config.botUsername);
+		if (message.media_group_id) {
+			const key = `${message.chat.id}:${message.media_group_id}`;
+			acceptedMediaGroupKeys.add(key);
+			setTimeout(() => acceptedMediaGroupKeys.delete(key), TELEGRAM_MEDIA_GROUP_DEBOUNCE_MS + 5000);
+		}
+		const command = normalizeCommand((message.text || message.caption || "").toLowerCase());
+		if (command === "id") {
+			await sendTextReply(message.chat.id, message.message_id, `Your user id: ${fromId}`);
+			return;
+		}
+		if (command !== undefined) return; // non-whitelisted users cannot run commands
+		if (!message.text && !message.caption && !message.media_group_id) return;
 		await handleAuthorizedTelegramMessage(message, ctx);
 	}
 
@@ -1158,6 +1310,7 @@ export default function (pi: ExtensionAPI) {
 			const status = [
 				`bot: ${config.botUsername ? `@${config.botUsername}` : "not configured"}`,
 				`allowed user: ${config.allowedUserId ?? "not paired"}`,
+				`group whitelist: ${(config.allowedUserIds ?? []).length} user(s)`,
 				`polling: ${pollingPromise ? "running" : "stopped"}`,
 				`active telegram turn: ${activeTelegramTurn ? "yes" : "no"}`,
 				`queued telegram turns: ${queuedTelegramTurns.length}`,
@@ -1233,7 +1386,7 @@ export default function (pi: ExtensionAPI) {
 			const nextTurn = queuedTelegramTurns.shift();
 			if (nextTurn) {
 				activeTelegramTurn = { ...nextTurn };
-				previewState = { mode: draftSupport === "unsupported" ? "message" : "draft", pendingText: "", lastSentText: "" };
+				previewState = { mode: draftSupport === "unsupported" ? "message" : "draft", pendingText: "", lastSentText: "", replyToMessageId: nextTurn.replyToMessageId };
 				startTypingLoop(ctx);
 			}
 		}
@@ -1246,13 +1399,13 @@ export default function (pi: ExtensionAPI) {
 		if (previewState && (previewState.pendingText.trim().length > 0 || previewState.lastSentText.trim().length > 0)) {
 			await finalizePreview(activeTelegramTurn.chatId);
 		}
-		previewState = { mode: draftSupport === "unsupported" ? "message" : "draft", pendingText: "", lastSentText: "" };
+		previewState = { mode: draftSupport === "unsupported" ? "message" : "draft", pendingText: "", lastSentText: "", replyToMessageId: activeTelegramTurn.replyToMessageId };
 	});
 
 	pi.on("message_update", async (event, _ctx) => {
 		if (!activeTelegramTurn || !isAssistantMessage(event.message)) return;
 		if (!previewState) {
-			previewState = { mode: draftSupport === "unsupported" ? "message" : "draft", pendingText: "", lastSentText: "" };
+			previewState = { mode: draftSupport === "unsupported" ? "message" : "draft", pendingText: "", lastSentText: "", replyToMessageId: activeTelegramTurn.replyToMessageId };
 		}
 		previewState.pendingText = getMessageText(event.message);
 		schedulePreviewFlush(activeTelegramTurn.chatId);

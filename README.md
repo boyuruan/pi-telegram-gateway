@@ -1,6 +1,6 @@
 # pi-telegram
 
-Telegram DM bridge for pi.
+Telegram bridge for pi — private chats and group chats.
 
 Adapted for the latest version of pi (`@earendil-works/pi-coding-agent`).
 
@@ -84,11 +84,22 @@ Once paired, the pairing code is cleared and only your Telegram account can inte
 
 ## Usage
 
-Chat with your bot in Telegram DMs.
+Chat with your bot in Telegram DMs, or add it to a group.
 
 ### Send text
 
 Send any message in the bot DM. It is forwarded into pi with a `[telegram]` prefix.
+
+### In group chats
+
+The bot can be used in groups in two ways:
+
+- **@mention it**: anyone can `@bot` the bot and it will respond.
+- **Whitelist (免 @)**: users on the whitelist can talk to the bot directly without mentioning it.
+
+The owner (the account that paired via `/start <code>`) is always allowed in groups without a mention.
+
+Replies in groups are sent as quote-replies so the right person gets notified.
 
 ### Send images and files
 
@@ -129,15 +140,20 @@ That aborts the active pi turn.
 
 If you send more Telegram messages while pi is busy, they are queued and processed in order.
 
-## Commands (in Telegram DM)
+## Commands (in Telegram DM or group)
 
 | Command     | Description                              |
 | ----------- | ---------------------------------------- |
-| `/start <code>` | Pair with the extension             |
+| `/start <code>` | Pair with the extension (DM only)   |
 | `/status`   | Show model, token usage, and context     |
 | `/compact`  | Trigger context compaction               |
+| `/whitelist` | Show the group whitelist               |
+| `/whitelist add <user id>` | Add a user to the group whitelist (owner only) |
+| `/whitelist remove <user id>` | Remove a user from the whitelist (owner only) |
 | `/help`     | Show available commands                  |
 | `stop` / `/stop` | Abort the active pi turn            |
+
+Non-whitelisted users in a group can only run `/id` (via @mention) to learn their own user id, which the owner can then add to the whitelist.
 
 ## Streaming
 
@@ -148,7 +164,7 @@ It tries Telegram draft streaming first with `sendMessageDraft`. If that is not 
 ## Notes
 
 - Only one pi session should be connected to the bot at a time
-- Replies are sent as normal Telegram messages, not quote-replies
+- Replies are sent as quote-replies (in groups this notifies the person who asked)
 - Long replies are split below Telegram's 4096 character limit
 - Outbound files are sent via `telegram_attach`
 

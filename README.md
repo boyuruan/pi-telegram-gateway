@@ -80,7 +80,7 @@ After `/telegram-setup` (which shows a pairing code) and `/telegram-connect`:
 1. Open the DM with your bot in Telegram
 2. Send `/start <pairing-code>` (e.g. `/start 123456`)
 
-Once paired, the pairing code is cleared and only your Telegram account can interact with the bot.
+Once paired, the pairing code is cleared. By default only your Telegram account can interact with the bot; use `/whitelist add <user id>` to authorize additional accounts (e.g. family members) — whitelisted users share the same pi session, both in private chat and in groups.
 
 ## Usage
 
@@ -95,7 +95,7 @@ Send any message in the bot DM. It is forwarded into pi with a `[telegram]` pref
 The bot can be used in groups in two ways:
 
 - **@mention it**: anyone can `@bot` the bot and it will respond.
-- **Whitelist (免 @)**: users on the whitelist can talk to the bot directly without mentioning it.
+- **Whitelist**: whitelisted users can talk to the bot in private chat, and in groups without mentioning it. All whitelisted users share one pi session (shared context, shared memory).
 
 The owner (the account that paired via `/start <code>`) is always allowed in groups without a mention.
 
@@ -147,13 +147,13 @@ If you send more Telegram messages while pi is busy, they are queued and process
 | `/start <code>` | Pair with the extension (DM only)   |
 | `/status`   | Show model, token usage, and context     |
 | `/compact`  | Trigger context compaction               |
-| `/whitelist` | Show the group whitelist               |
-| `/whitelist add <user id>` | Add a user to the group whitelist (owner only) |
+| `/whitelist` | Show authorized users                  |
+| `/whitelist add <user id>` | Authorize a user for private chat + groups (owner only) |
 | `/whitelist remove <user id>` | Remove a user from the whitelist (owner only) |
 | `/help`     | Show available commands                  |
 | `stop` / `/stop` | Abort the active pi turn            |
 
-Non-whitelisted users in a group can only run `/id` (via @mention) to learn their own user id, which the owner can then add to the whitelist.
+Unauthorized users who message the bot privately get a reply containing their user id, which the owner can then add with `/whitelist add <user id>`. In groups, non-whitelisted users can run `/id` (via @mention) for the same purpose.
 
 ## Streaming
 

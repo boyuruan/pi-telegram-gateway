@@ -1041,7 +1041,7 @@ export default function (pi: ExtensionAPI) {
 		const current = config.allowedUserIds ?? [];
 
 		if (sub === undefined || sub === "list") {
-			const lines = ["Group whitelist (免 @ 使用):"];
+			const lines = ["Authorized users (private chat & groups):"];
 			if (current.length === 0) lines.push("(empty)");
 			for (const id of current) lines.push(`- ${id}`);
 			lines.push(`Owner (${config.allowedUserId}) is always allowed.`);
@@ -1059,7 +1059,7 @@ export default function (pi: ExtensionAPI) {
 				await sendTextReply(
 					firstMessage.chat.id,
 					firstMessage.message_id,
-					`Usage: /whitelist ${sub} <user id>\n\nFind your user id by sending /id to the bot in the group.`,
+					`Usage: /whitelist ${sub} <user id>\n\nAnyone can learn their user id by messaging the bot — the reply includes it.`, 
 				);
 				return;
 			}
@@ -1156,8 +1156,12 @@ export default function (pi: ExtensionAPI) {
 		const isWhitelisted = isOwner || (config.allowedUserIds?.includes(fromId) ?? false);
 
 		if (chatType === "private") {
-			if (!isOwner) {
-				await sendTextReply(message.chat.id, message.message_id, "This bot is not authorized for your account.");
+			if (!isWhitelisted) {
+				await sendTextReply(
+					message.chat.id,
+					message.message_id,
+					`This bot is not authorized for your account.\nYour user id: ${fromId}\nAsk the owner to add you with: /whitelist add ${fromId}`,
+				);
 				return;
 			}
 			await handleAuthorizedTelegramMessage(message, ctx);

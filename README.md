@@ -1,4 +1,4 @@
-# pi-telegram
+# pi-telegram-gateway
 
 Telegram bridge for pi — private chats and group chats.
 
@@ -19,13 +19,13 @@ Adapted for the latest version of pi (`@earendil-works/pi-coding-agent`).
 From git:
 
 ```bash
-pi install git:github.com/boyuruan/pi-telegram
+pi install git:github.com/boyuruan/pi-telegram-gateway
 ```
 
 Or for a single run:
 
 ```bash
-pi -e git:github.com/boyuruan/pi-telegram
+pi -e git:github.com/boyuruan/pi-telegram-gateway
 ```
 
 ## Configure

@@ -1,5 +1,5 @@
 {
-  "name": "pi-telegram",
+  "name": "pi-telegram-gateway",
   "version": "0.2.0",
   "private": false,
   "description": "Telegram DM bridge extension for pi",

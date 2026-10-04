@@ -108,6 +108,8 @@ interface TelegramMessage {
 	voice?: TelegramVoice;
 	animation?: TelegramAnimation;
 	sticker?: TelegramSticker;
+	/** Unix time in seconds when the message was sent. */
+	date?: number;
 }
 
 interface TelegramUpdate {
@@ -187,7 +189,9 @@ const TEMP_FILE_MAX_AGE_MS = 60 * 60 * 1000; // 1 hour
 const SYSTEM_PROMPT_SUFFIX = `
 
 Telegram bridge extension is active.
-- Messages forwarded from Telegram are prefixed with "[telegram]".
+- Messages forwarded from Telegram are prefixed with "[telegram]", followed by a metadata block such as
+  {chat_id=123, chat_type=private, message_id=45, from_id=678, from_name=Alice, ts=2026-01-02T03:04:05+08:00}.
+  ts is the time the message was sent, in the host's local timezone.
 - [telegram] messages may include local temp file paths for Telegram attachments. Read those files as needed.
 - If a [telegram] user asked for a file or generated artifact, use the telegram_attach tool with the local file path so the extension can send it with your next final reply.
 - Do not assume mentioning a local file path in plain text will send it to Telegram. Use telegram_attach.`;
@@ -195,6 +199,33 @@ Telegram bridge extension is active.
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+function formatLocalIsoTime(unixSeconds: number): string {
+	const date = new Date(unixSeconds * 1000);
+	const pad = (value: number) => String(Math.abs(value)).padStart(2, "0");
+	const offsetMinutes = -date.getTimezoneOffset();
+	const sign = offsetMinutes >= 0 ? "+" : "-";
+	return (
+		`${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}` +
+		`T${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}` +
+		`${sign}${pad(Math.trunc(offsetMinutes / 60))}:${pad(offsetMinutes % 60)}`
+	);
+}
+
+function formatTelegramMeta(message: TelegramMessage): string {
+	const fields = [
+		`chat_id=${message.chat.id}`,
+		`chat_type=${message.chat.type}`,
+		`message_id=${message.message_id}`,
+	];
+	if (message.from) {
+		fields.push(`from_id=${message.from.id}`);
+		const name = (message.from.first_name || message.from.username || "").replace(/[{},\n]/g, " ").trim();
+		if (name) fields.push(`from_name=${name}`);
+	}
+	if (message.date) fields.push(`ts=${formatLocalIsoTime(message.date)}`);
+	return `{${fields.join(", ")}}`;
+}
 
 function isTelegramPrompt(prompt: string): boolean {
 	return prompt.trimStart().startsWith(TELEGRAM_PREFIX);
@@ -872,7 +903,7 @@ export default function (pi: ExtensionAPI) {
 		const rawText = messages.map((message) => (message.text || message.caption || "").trim()).filter(Boolean).join("\n\n");
 		const files = await buildTelegramFiles(messages);
 		const content: Array<TextContent | ImageContent> = [];
-		let prompt = `${TELEGRAM_PREFIX}`;
+		let prompt = `${TELEGRAM_PREFIX} ${formatTelegramMeta(firstMessage)}`;
 		if (firstMessage.chat.type !== "private") {
 			prompt += " (from a Telegram group chat)";
 		}
@@ -913,7 +944,7 @@ export default function (pi: ExtensionAPI) {
 			replyToMessageId: firstMessage.message_id,
 			queuedAttachments: [],
 			content,
-			historyText: formatTelegramHistoryText(rawText, files),
+			historyText: `${formatTelegramMeta(firstMessage)} ${formatTelegramHistoryText(rawText, files)}`,
 		};
 	}
 
